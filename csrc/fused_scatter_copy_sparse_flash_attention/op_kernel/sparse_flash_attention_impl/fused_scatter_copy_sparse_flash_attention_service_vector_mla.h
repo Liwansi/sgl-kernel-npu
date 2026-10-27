@@ -1111,8 +1111,10 @@ __aicore__ inline void SFAVectorService<SFAT>::CopyInDramKv(int64_t &mte2Size, i
     }
 
     const int64_t ubRow = mte2Size - mte3Size;
-    const uint64_t keyRowStride = SFAT::combinedKvStorage ? constInfo.storageTokenStride : constInfo.headDim;
-    const uint64_t ropeRowStride = SFAT::combinedKvStorage ? constInfo.storageTokenStride : constInfo.headDimRope;
+    // DRAM rows follow the offloaded pool layout, which may be split K/V
+    // even when the HBM pages stay combined.
+    const uint64_t keyRowStride = SFAT::dramCombinedKvStorage ? constInfo.storageTokenStride : constInfo.headDim;
+    const uint64_t ropeRowStride = SFAT::dramCombinedKvStorage ? constInfo.storageTokenStride : constInfo.headDimRope;
     DataCopyExtParams copyParams;
     copyParams.blockCount = 1;
     copyParams.blockLen = constInfo.headDim * sizeof(KV_T);

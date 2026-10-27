@@ -21,6 +21,11 @@ struct alignas(8) FusedCopySfaTilingData {
     uint32_t missCap;
     uint32_t hbmMaxBlockNum;
     uint32_t dramMaxBlockNum;
+    // Non-zero when the DRAM pool uses the GVA split layout: K[512] and
+    // rope/V[64] live in separately allocated buffers. Zero keeps the legacy
+    // combined [CKV|KPE]=576 rows at one base pointer.
+    uint32_t dramSplitLayout;
+    uint32_t reserved;
 };
 
 static_assert(sizeof(SparseFlashAttentionTilingDataMla) == 144);
@@ -36,6 +41,7 @@ static_assert(offsetof(FusedCopySfaTilingData, copyCap) == 144);
 static_assert(offsetof(FusedCopySfaTilingData, missCap) == 148);
 static_assert(offsetof(FusedCopySfaTilingData, hbmMaxBlockNum) == 152);
 static_assert(offsetof(FusedCopySfaTilingData, dramMaxBlockNum) == 156);
-static_assert(sizeof(FusedCopySfaTilingData) == 160);
+static_assert(offsetof(FusedCopySfaTilingData, dramSplitLayout) == 160);
+static_assert(sizeof(FusedCopySfaTilingData) == 168);
 
 #endif  // SGL_KERNEL_NPU_FUSED_COPY_SFA_TILING_DATA_H

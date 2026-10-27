@@ -42,12 +42,12 @@ torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
     actual_seq_lengths_query, actual_seq_lengths_kv, num_cache_tokens,
     topk_src_ids, topk_dst_slots, topk_miss_counts,
     miss_src_ids, miss_dst_slots, miss_counts,
-    hbm_block_table, dram_block_table, dram_kv_dev_ptr,
+    hbm_block_table, dram_block_table, dram_k_dev_ptr, dram_v_dev_ptr,
     attention_out, scale_value,
 )
 ```
 
-`dram_kv_dev_ptr` is the registered device address for the manager's combined mapped host rows. The wrapper derives the KPE address from the CKV base and element width; do not pass an arbitrary CPU pointer.
+`dram_k_dev_ptr` is the registered device address of the DRAM-side CKV[512] rows. A non-zero `dram_v_dev_ptr` selects the GVA split layout: K[512] and rope/V[64] live in separately allocated, densely paged buffers and the wrapper passes both bases straight to the kernel. A zero `dram_v_dev_ptr` keeps the legacy combined layout, where the wrapper derives the KPE address from the CKV base plus one element-stride-576 row offset. Do not pass arbitrary CPU pointers; both must be NPU-visible addresses.
 
 ## Upstream provenance
 

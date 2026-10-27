@@ -177,6 +177,7 @@ class _DynamicTndCase:
             name="copy_sfa_dynamic_tnd_dram",
         )
         self.dram.copy_(dram_cpu)
+        self.dram_v_dev_ptr = 0
 
         self.miss_src_cpu = torch.full(
             (batch_size, MISS_CAPACITY), -1, dtype=torch.int32
@@ -323,6 +324,7 @@ class _DynamicTndCase:
             self.hbm_block_table,
             self.dram_block_table,
             self.dram_dev_ptr,
+            self.dram_v_dev_ptr,
             self.output if output is None else output,
             self.scale,
         )
@@ -452,6 +454,7 @@ class _C0DenseMixedGraphCase:
             name="copy_sfa_c0_dense_graph_dram",
         )
         self.dram.zero_()
+        self.dram_v_dev_ptr = 0
         self.hbm = self.hbm_cpu.to(self.device)
         self.query = self.query.to(self.device)
         self.query_rope = self.query_rope.to(self.device)
@@ -500,6 +503,7 @@ class _C0DenseMixedGraphCase:
             self.hbm_block_table,
             self.dram_block_table,
             self.dram_dev_ptr,
+            self.dram_v_dev_ptr,
             output,
             self.scale,
         )

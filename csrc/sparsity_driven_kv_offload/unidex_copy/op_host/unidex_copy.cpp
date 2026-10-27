@@ -111,10 +111,14 @@ HOST_API void unidex_copy(const at::Tensor &src, at::Tensor &dst, const at::Tens
     TORCH_CHECK(valid_mask.numel() >= max_copy, "valid_mask has ", valid_mask.numel(),
                 " elements, fewer than max_copy=", max_copy);
 
+    // The kernel addresses rows with uint64_t byte offsets, so multi-gigabyte
+    // buffers (e.g. GVA DRAM pools) are supported; row counts, block_bytes,
+    // and max_copy still must fit in uint32_t individually.
+    constexpr uint64_t kMaxTotalBytes = 1ULL << 48;
     const uint64_t srcRequiredBytes = static_cast<uint64_t>(src_rows) * static_cast<uint64_t>(block_bytes);
     const uint64_t dstRequiredBytes = static_cast<uint64_t>(dst_rows) * static_cast<uint64_t>(block_bytes);
-    TORCH_CHECK(srcRequiredBytes <= kUint32Max, "src_rows * block_bytes exceeds the kernel uint32 address range");
-    TORCH_CHECK(dstRequiredBytes <= kUint32Max, "dst_rows * block_bytes exceeds the kernel uint32 address range");
+    TORCH_CHECK(srcRequiredBytes <= kMaxTotalBytes, "src_rows * block_bytes exceeds the kernel address range");
+    TORCH_CHECK(dstRequiredBytes <= kMaxTotalBytes, "dst_rows * block_bytes exceeds the kernel address range");
     if (!useRawSrc) {
         const uint64_t srcAvailableBytes =
             static_cast<uint64_t>(src.numel()) * static_cast<uint64_t>(src.element_size());

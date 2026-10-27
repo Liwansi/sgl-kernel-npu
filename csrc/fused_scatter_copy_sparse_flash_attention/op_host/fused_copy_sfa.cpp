@@ -57,7 +57,7 @@ void fused_scatter_copy_sparse_flash_attention(
     const at::Tensor &num_cache_tokens, const at::Tensor &topk_src_ids, const at::Tensor &topk_dst_slots,
     const at::Tensor &topk_miss_counts, const at::Tensor &miss_src_ids, const at::Tensor &miss_dst_slots,
     const at::Tensor &miss_counts, const at::Tensor &hbm_block_table, const at::Tensor &dram_block_table,
-    int64_t dram_kv_dev_ptr, at::Tensor &attention_out, double scale_value)
+    int64_t dram_k_dev_ptr, int64_t dram_v_dev_ptr, at::Tensor &attention_out, double scale_value)
 {
     TORCH_CHECK(query.scalar_type() == at::kHalf || query.scalar_type() == at::kBFloat16,
                 "query must be float16 or bfloat16");
@@ -80,7 +80,8 @@ void fused_scatter_copy_sparse_flash_attention(
     TORCH_CHECK(combined_hbm_cache.size(0) > 0, "combined_hbm_cache must contain at least one page");
     TORCH_CHECK(attention_out.sizes() == query.sizes() && attention_out.scalar_type() == query.scalar_type(),
                 "attention_out must match query shape and dtype");
-    TORCH_CHECK(dram_kv_dev_ptr > 0, "dram_kv_dev_ptr must be a registered host pointer");
+    TORCH_CHECK(dram_k_dev_ptr > 0, "dram_k_dev_ptr must be a registered host pointer");
+    TORCH_CHECK(dram_v_dev_ptr >= 0, "dram_v_dev_ptr must be 0 or a registered host pointer");
     TORCH_CHECK(hbm_block_table.dim() == 2 && hbm_block_table.size(0) == batchSize && hbm_block_table.size(1) > 0,
                 "hbm_block_table must be [B, hbm_pages_per_request]");
     TORCH_CHECK(dram_block_table.dim() == 2 && dram_block_table.size(0) == batchSize && dram_block_table.size(1) > 0,
@@ -171,12 +172,19 @@ void fused_scatter_copy_sparse_flash_attention(
     fusedTilingData.missCap = static_cast<uint32_t>(miss_src_ids.size(1));
     fusedTilingData.hbmMaxBlockNum = static_cast<uint32_t>(hbm_block_table.size(1));
     fusedTilingData.dramMaxBlockNum = static_cast<uint32_t>(dram_block_table.size(1));
+    // A non-zero dram_v_dev_ptr selects the GVA split layout: K[512] and
+    // rope/V[64] are independently allocated buffers. Zero keeps the legacy
+    // combined [CKV|KPE]=576 rows addressed from the K base pointer.
+    const bool dramSplitLayout = dram_v_dev_ptr > 0;
+    fusedTilingData.dramSplitLayout = dramSplitLayout ? 1U : 0U;
+    fusedTilingData.reserved = 0;
     std::array<uint8_t, sizeof(FusedCopySfaTilingData)> tilingBytes{};
     std::memcpy(tilingBytes.data(), &fusedTilingData, sizeof(fusedTilingData));
     auto tilingTensor = context->GetTilingTensor(tilingBytes);
     auto workspace = at::empty({static_cast<int64_t>(context->GetWorkspaceSize())}, query.options().dtype(at::kByte));
-    auto *dramKv = reinterpret_cast<void *>(static_cast<uintptr_t>(dram_kv_dev_ptr));
-    auto *dramRope = reinterpret_cast<void *>(static_cast<uintptr_t>(dram_kv_dev_ptr + kKvDim * 2));
+    auto *dramKv = reinterpret_cast<void *>(static_cast<uintptr_t>(dram_k_dev_ptr));
+    auto *dramRope = dramSplitLayout ? reinterpret_cast<void *>(static_cast<uintptr_t>(dram_v_dev_ptr))
+                                     : reinterpret_cast<void *>(static_cast<uintptr_t>(dram_k_dev_ptr + kKvDim * 2));
     auto *hbmRope = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(combined_hbm_cache.data_ptr()) + kKvDim * 2);
 
     LaunchCombined(tiling.GetBlockDim(), query, cacheKey, cacheKey, topk_dst_slots, num_cache_tokens, hbm_block_table,

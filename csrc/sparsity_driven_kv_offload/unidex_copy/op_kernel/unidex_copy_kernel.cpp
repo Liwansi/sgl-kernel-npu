@@ -13,8 +13,9 @@
  * pipelines GM-to-UB and UB-to-GM transfers. Invalid mask entries, negative
  * indices, and out-of-range indices are skipped without reporting an error.
  *
- * The host wrapper limits blockBytes to 32 KiB and validates that the addressed
- * source and destination extents fit in the kernel's uint32_t offset range.
+ * The host wrapper limits blockBytes to 32 KiB. Row offsets are computed in
+ * uint64_t so multi-gigabyte source/destination buffers (e.g. GVA DRAM pools)
+ * are addressed correctly; row counts and blockBytes still fit in uint32_t.
  * Byte-wise copying keeps the kernel independent of the tensor element type.
  */
 
@@ -59,8 +60,8 @@ public:
         const uint32_t blockNum = AscendC::GetBlockNum();
         this->copyRowsPerCore = (maxCopy + blockNum - 1) / blockNum;
 
-        srcGm.SetGlobalBuffer((__gm__ CopyUnit *)src, srcRows * blockBytes);
-        dstGm.SetGlobalBuffer((__gm__ CopyUnit *)dst, dstRows * blockBytes);
+        srcGm.SetGlobalBuffer((__gm__ CopyUnit *)src, static_cast<uint64_t>(srcRows) * blockBytes);
+        dstGm.SetGlobalBuffer((__gm__ CopyUnit *)dst, static_cast<uint64_t>(dstRows) * blockBytes);
         srcIndexGm.SetGlobalBuffer((__gm__ int64_t *)src_index, maxCopy);
         dstIndexGm.SetGlobalBuffer((__gm__ int64_t *)dst_index, maxCopy);
         validMaskGm.SetGlobalBuffer((__gm__ uint8_t *)valid_mask, maxCopy);
@@ -92,14 +93,14 @@ public:
             coreEnd = maxCopy;
         }
 
-        uint32_t dstOffsets[BUFFER_NUM] = {0, 0};
+        uint64_t dstOffsets[BUFFER_NUM] = {0, 0};
         uint32_t queueHead = 0;
         uint32_t queueTail = 0;
         uint32_t queued = 0;
 
         for (uint32_t i = coreBegin; i < coreEnd; ++i) {
-            uint32_t srcOffset = 0;
-            uint32_t dstOffset = 0;
+            uint64_t srcOffset = 0;
+            uint64_t dstOffset = 0;
             if (!BuildCopyTask(i, srcOffset, dstOffset)) {
                 continue;
             }
@@ -144,8 +145,10 @@ private:
      *
      * A mapping is accepted only when its validity flag is nonzero and both
      * row indices are non-negative and within their respective row counts.
+     * Offsets are widened to uint64_t before multiplying so buffers larger
+     * than 4 GiB are addressed correctly.
      */
-    __aicore__ inline bool BuildCopyTask(uint32_t mapIdx, uint32_t &srcOffset, uint32_t &dstOffset)
+    __aicore__ inline bool BuildCopyTask(uint32_t mapIdx, uint64_t &srcOffset, uint64_t &dstOffset)
     {
         if (validMaskGm.GetValue(mapIdx) == 0) {
             return false;
@@ -160,8 +163,8 @@ private:
             return false;
         }
 
-        srcOffset = static_cast<uint32_t>(srcRow) * blockBytes;
-        dstOffset = static_cast<uint32_t>(dstRow) * blockBytes;
+        srcOffset = static_cast<uint64_t>(srcRow) * blockBytes;
+        dstOffset = static_cast<uint64_t>(dstRow) * blockBytes;
         return true;
     }
 
@@ -172,7 +175,7 @@ private:
      * Each queue allocation reserves blockBytes rounded up to a multiple of
      * 32 bytes.
      */
-    __aicore__ inline void CopyIn(uint32_t srcOffset)
+    __aicore__ inline void CopyIn(uint64_t srcOffset)
     {
         AscendC::LocalTensor<CopyUnit> local = copyQue.AllocTensor<CopyUnit>();
         AscendC::DataCopyExtParams copyParams{1, blockBytes, 0, 0, 0};
@@ -185,7 +188,7 @@ private:
      * @brief Dequeue one row, copy it from UB to GM, and free its buffer.
      * @param dstOffset Destination byte offset in GM.
      */
-    __aicore__ inline void CopyOut(uint32_t dstOffset)
+    __aicore__ inline void CopyOut(uint64_t dstOffset)
     {
         AscendC::LocalTensor<CopyUnit> local = copyQue.DeQue<CopyUnit>();
         AscendC::DataCopyExtParams copyParams{1, blockBytes, 0, 0, 0};

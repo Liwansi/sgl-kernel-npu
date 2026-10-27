@@ -67,7 +67,7 @@ template <typename Q_T, typename KV_T, typename OUT_T, const bool FLASH_DECODE =
           SFA_LAYOUT LAYOUT_T = SFA_LAYOUT::BSND, SFA_LAYOUT KV_LAYOUT_T = SFA_LAYOUT::BSND,
           const int TEMPLATE_MODE = C_TEMPLATE, const int STAGE_MODE = SFA_STAGE_NORMAL,
           const bool SOURCE_AWARE_GATHER = false, const bool MTP_MODE = false, const bool COMBINED_KV_STORAGE = false,
-          typename... Args>
+          const bool DRAM_COMBINED_KV_STORAGE = COMBINED_KV_STORAGE, typename... Args>
 struct SFAType {
     using queryType = Q_T;
     using kvType = KV_T;
@@ -82,6 +82,10 @@ struct SFAType {
     // The combined MLA page format stores CKV[512] then KPE[64] in each
     // token row. Split-layout callers retain their existing default.
     static constexpr bool combinedKvStorage = COMBINED_KV_STORAGE;
+    // Offloaded DRAM rows may use a different layout from the HBM pages, e.g.
+    // a GVA pool with separate K[512] / rope[64] buffers while HBM stays
+    // combined. Defaults to the HBM choice for existing callers.
+    static constexpr bool dramCombinedKvStorage = DRAM_COMBINED_KV_STORAGE;
     static constexpr bool pageAttention = (KV_LAYOUT_T == SFA_LAYOUT::PA_BSND);
 };
 

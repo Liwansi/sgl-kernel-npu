@@ -39,6 +39,7 @@ class _CopySfaCase:
         query_heads: int = 8,
         capacity: int = 2048,
         max_context_len: int = 8192,
+        dram_split: bool = False,
     ):
         _, offload_ops = _require_npu()
         self.create_shm_tensor = offload_ops.create_shm_tensor
@@ -58,16 +59,35 @@ class _CopySfaCase:
         self.dtype = dtype
         self.query_heads = query_heads
         self.scale = 1.0 / math.sqrt(512 + 64)
+        self.dram_split = dram_split
 
         self.logical_kv = torch.randn(
             (real_request_count, self.max_context_len, 576), dtype=torch.float32
         ).to(dtype)
-        self.dram, self.dram_host_ptr, self.dram_dev_ptr = self.create_shm_tensor(
-            (real_request_count * self.max_context_len, 576),
-            dtype,
-            device_id=self.device_id,
-            name="copy_sfa_combined_dram",
-        )
+        if self.dram_split:
+            # GVA layout: K[512] and rope/V[64] are separate densely paged
+            # buffers sharing one token-block table.
+            self.dram_k, _, self.dram_k_dev_ptr = self.create_shm_tensor(
+                (real_request_count * self.max_context_len, 512),
+                dtype,
+                device_id=self.device_id,
+                name="copy_sfa_gva_dram_k",
+            )
+            self.dram_v, _, self.dram_v_dev_ptr = self.create_shm_tensor(
+                (real_request_count * self.max_context_len, 64),
+                dtype,
+                device_id=self.device_id,
+                name="copy_sfa_gva_dram_v",
+            )
+        else:
+            self.dram, self.dram_host_ptr, self.dram_dev_ptr = self.create_shm_tensor(
+                (real_request_count * self.max_context_len, 576),
+                dtype,
+                device_id=self.device_id,
+                name="copy_sfa_combined_dram",
+            )
+            self.dram_k_dev_ptr = self.dram_dev_ptr
+            self.dram_v_dev_ptr = 0
         self._populate_dram_with_page_permutation()
 
         # Include one reserved group for req_id == real_request_count so the
@@ -153,10 +173,24 @@ class _CopySfaCase:
         # Physical host pages are intentionally permuted. The operator receives
         # only the device-mapped base pointer and resolves logical page IDs via
         # the per-request DRAM block table.
+        permutation = _page_permutation(self.dram_pages, 17)
+        if self.dram_split:
+            physical_k = self.dram_k.view(
+                self.real_request_count, self.dram_pages, self.page_size, 512
+            )
+            physical_v = self.dram_v.view(
+                self.real_request_count, self.dram_pages, self.page_size, 64
+            )
+            for req_id in range(self.real_request_count):
+                for logical_page, physical_page in enumerate(permutation):
+                    start = logical_page * self.page_size
+                    page = self.logical_kv[req_id, start : start + self.page_size]
+                    physical_k[req_id, physical_page].copy_(page[:, :512])
+                    physical_v[req_id, physical_page].copy_(page[:, 512:])
+            return
         physical = self.dram.view(
             self.real_request_count, self.dram_pages, self.page_size, 576
         )
-        permutation = _page_permutation(self.dram_pages, 17)
         for req_id in range(self.real_request_count):
             for logical_page, physical_page in enumerate(permutation):
                 start = logical_page * self.page_size
@@ -226,7 +260,8 @@ class _CopySfaCase:
             self.miss_counts,
             self.hbm_block_table,
             self.dram_block_table,
-            self.dram_dev_ptr,
+            self.dram_k_dev_ptr,
+            self.dram_v_dev_ptr,
             self.attention_out,
             self.scale,
         )
@@ -448,6 +483,51 @@ def test_native_combined_copy_sfa_single_request_first_fill_and_all_hits():
         case.assert_planned_request(0, sources, set())
         case.assert_attention({0: sources})
         assert torch.equal(case.hbm, before)
+    finally:
+        case.close()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_native_gva_split_copy_sfa_first_fill_and_partial_miss(dtype):
+    # GVA pools pass separate K[512] / rope-V[64] DRAM buffers while the HBM
+    # resident cache stays combined [CKV|KPE]=576. Cover first fill, an
+    # all-hit replay, and a steady-state partial miss through that layout.
+    case = _CopySfaCase(
+        real_request_count=2,
+        batch_req_ids=[0, 1],
+        dtype=dtype,
+        dram_split=True,
+    )
+    try:
+        first = list(range(case.capacity))
+        case.set_request_sources(0, first)
+        case.set_request_sources(1, first)
+        case.run()
+        case.assert_counts({0: case.capacity, 1: case.capacity})
+        case.assert_planned_request(0, first, set(first))
+        case.assert_planned_request(1, first, set(first))
+        case.assert_attention({0: first, 1: first})
+        case.assert_state_bijection_and_payload()
+
+        # All-hit replay must reproduce the same attention golden result.
+        before = case.hbm.clone()
+        case.run()
+        case.assert_counts({0: 0, 1: 0})
+        case.assert_planned_request(0, first, set())
+        case.assert_attention({0: first, 1: first})
+        assert torch.equal(case.hbm, before)
+
+        # Steady-state miss: replace half of the selected sources.
+        retained = first[: case.capacity // 2]
+        fresh = list(range(case.capacity, case.capacity + case.capacity // 2))
+        second = retained + fresh
+        case.set_request_sources(0, second)
+        case.set_request_sources(1, first)
+        case.run()
+        case.assert_counts({0: case.capacity // 2, 1: 0})
+        case.assert_planned_request(0, second, set(fresh))
+        case.assert_attention({0: second, 1: first})
+        case.assert_state_bijection_and_payload()
     finally:
         case.close()
 

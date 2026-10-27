@@ -40,7 +40,7 @@ using FusedScatterCopySparseFlashAttentionTilingDataMla = SparseFlashAttentionTi
 
 using namespace AscendC;
 namespace {
-template <typename T, bool COMBINED_LAYOUT = false>
+template <typename T, bool DRAM_SPLIT_LAYOUT = false>
 __aicore__ inline void
 RunFirstFillScatterCopy(__gm__ uint8_t *hbmKeyRope, __gm__ uint8_t *hbmKvCache, __gm__ uint8_t *dramKeyRope,
                         __gm__ uint8_t *dramKvCache, __gm__ uint8_t *hbmBlockTable, __gm__ uint8_t *dramBlockTable,
@@ -48,7 +48,7 @@ RunFirstFillScatterCopy(__gm__ uint8_t *hbmKeyRope, __gm__ uint8_t *hbmKvCache, 
                         const __gm__ FusedScatterCopySparseFlashAttentionTilingData *fusedTiling, TPipe *pipe)
 {
     if ASCEND_IS_AIV {
-        FirstFillScatterCopyNs::FirstFillScatterCopyKernel<T, COMBINED_LAYOUT> copy(pipe, fusedTiling);
+        FirstFillScatterCopyNs::FirstFillScatterCopyKernel<T, DRAM_SPLIT_LAYOUT> copy(pipe, fusedTiling);
         copy.Init(hbmKeyRope, hbmKvCache, dramKeyRope, dramKvCache, hbmBlockTable, dramBlockTable, missSourceIds,
                   missDstSlots, missCounts);
         copy.Process();
@@ -78,7 +78,7 @@ __aicore__ inline bool IsBatchFirstFill(__gm__ uint8_t *cacheTokens, __gm__ uint
     return firstFill;
 }
 
-template <typename T, bool SOURCE_AWARE, bool COMBINED_LAYOUT = false>
+template <typename T, bool SOURCE_AWARE, bool COMBINED_LAYOUT = false, bool DRAM_COMBINED_LAYOUT = true>
 __aicore__ inline void RunFusedMtp(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
                                    __gm__ uint8_t *sparseIndices, __gm__ uint8_t *cacheTokens,
                                    __gm__ uint8_t *hbmBlockTable, __gm__ uint8_t *actualSeqLengthsQuery,
@@ -96,7 +96,7 @@ __aicore__ inline void RunFusedMtp(__gm__ uint8_t *query, __gm__ uint8_t *key, _
     (void)missSourceIds;
     (void)missDstSlots;
     using MtpType = SFAType<T, T, T, false, SFA_LAYOUT::TND, SFA_LAYOUT::PA_BSND, V_TEMPLATE, SFA_STAGE_NORMAL,
-                            SOURCE_AWARE, true, COMBINED_LAYOUT>;
+                            SOURCE_AWARE, true, COMBINED_LAYOUT, DRAM_COMBINED_LAYOUT>;
     FusedScatterCopySparseFlashAttentionMla<MtpType> attention;
     const auto *attentionTiling =
         reinterpret_cast<const __gm__ FusedScatterCopySparseFlashAttentionTilingDataMla *>(fusedTiling);
@@ -122,6 +122,9 @@ extern "C" __global__ __aicore__ void fused_scatter_copy_sparse_flash_attention_
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     const auto *fusedTiling = reinterpret_cast<const __gm__ FusedCopySfaTilingData *>(tiling);
     const bool isBf16 = (fusedTiling->baseParams.dispatchKey & (1U << 16)) != 0;
+    // GVA pools pass separate K[512] / rope[64] DRAM buffers; legacy callers
+    // keep one combined [CKV|KPE]=576 base pointer.
+    const bool dramSplit = fusedTiling->dramSplitLayout != 0;
 
     TPipe pipe;
     __gm__ uint8_t *attentionWorkspace = GetUserWorkspace(workspace);
@@ -129,13 +132,25 @@ extern "C" __global__ __aicore__ void fused_scatter_copy_sparse_flash_attention_
         IsBatchFirstFill(cacheTokens, missCounts, fusedTiling->baseParams.batchSize, fusedTiling->missCap);
     if (firstFill) {
         if (isBf16) {
-            RunFirstFillScatterCopy<bfloat16_t, true>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
-                                                      dramBlockTable, missSourceIds, missDstSlots, missCounts,
-                                                      fusedTiling, &pipe);
+            if (dramSplit) {
+                RunFirstFillScatterCopy<bfloat16_t, true>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
+                                                          dramBlockTable, missSourceIds, missDstSlots, missCounts,
+                                                          fusedTiling, &pipe);
+            } else {
+                RunFirstFillScatterCopy<bfloat16_t, false>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
+                                                           dramBlockTable, missSourceIds, missDstSlots, missCounts,
+                                                           fusedTiling, &pipe);
+            }
         } else {
-            RunFirstFillScatterCopy<half, true>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
-                                                dramBlockTable, missSourceIds, missDstSlots, missCounts, fusedTiling,
-                                                &pipe);
+            if (dramSplit) {
+                RunFirstFillScatterCopy<half, true>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
+                                                    dramBlockTable, missSourceIds, missDstSlots, missCounts,
+                                                    fusedTiling, &pipe);
+            } else {
+                RunFirstFillScatterCopy<half, false>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
+                                                     dramBlockTable, missSourceIds, missDstSlots, missCounts,
+                                                     fusedTiling, &pipe);
+            }
         }
         // All MIX kernel tasks must reach the barrier. It establishes the
         // first-fill MTE3-to-Attention MTE2 dependency before either pipeline reads HBM.
@@ -144,29 +159,47 @@ extern "C" __global__ __aicore__ void fused_scatter_copy_sparse_flash_attention_
             pipe.Reset();
         }
     }
+#define RUN_FUSED_MTP(T)                                                                           \
+    do {                                                                                           \
+        if (dramSplit) {                                                                           \
+            if (firstFill) {                                                                       \
+                RunFusedMtp<T, false, true, false>(                                                \
+                    query, key, value, sparseIndices, cacheTokens, hbmBlockTable,                   \
+                    actualSeqLengthsQuery, actualSeqLengthsKv, queryRope, hbmKeyRope, dramKeyRope,  \
+                    dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts, missSourceIds,      \
+                    missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, \
+                    &pipe);                                                                         \
+            } else {                                                                               \
+                RunFusedMtp<T, true, true, false>(                                                 \
+                    query, key, value, sparseIndices, cacheTokens, hbmBlockTable,                   \
+                    actualSeqLengthsQuery, actualSeqLengthsKv, queryRope, hbmKeyRope, dramKeyRope,  \
+                    dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts, missSourceIds,      \
+                    missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, \
+                    &pipe);                                                                         \
+            }                                                                                       \
+        } else {                                                                                    \
+            if (firstFill) {                                                                        \
+                RunFusedMtp<T, false, true, true>(                                                  \
+                    query, key, value, sparseIndices, cacheTokens, hbmBlockTable,                   \
+                    actualSeqLengthsQuery, actualSeqLengthsKv, queryRope, hbmKeyRope, dramKeyRope,  \
+                    dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts, missSourceIds,      \
+                    missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, \
+                    &pipe);                                                                         \
+            } else {                                                                                \
+                RunFusedMtp<T, true, true, true>(                                                   \
+                    query, key, value, sparseIndices, cacheTokens, hbmBlockTable,                   \
+                    actualSeqLengthsQuery, actualSeqLengthsKv, queryRope, hbmKeyRope, dramKeyRope,  \
+                    dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts, missSourceIds,      \
+                    missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, \
+                    &pipe);                                                                         \
+            }                                                                                       \
+        }                                                                                           \
+    } while (false)
+
     if (!isBf16) {
-        if (firstFill) {
-            RunFusedMtp<half, false, true>(
-                query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
-                queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
-                missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);
-        } else {
-            RunFusedMtp<half, true, true>(
-                query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
-                queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
-                missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);
-        }
+        RUN_FUSED_MTP(half);
     } else {
-        if (firstFill) {
-            RunFusedMtp<bfloat16_t, false, true>(
-                query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
-                queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
-                missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);
-        } else {
-            RunFusedMtp<bfloat16_t, true, true>(
-                query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
-                queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
-                missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);
-        }
+        RUN_FUSED_MTP(bfloat16_t);
     }
+#undef RUN_FUSED_MTP
 }

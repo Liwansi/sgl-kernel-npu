@@ -19,7 +19,10 @@ constexpr int64_t COMBINED_TOKEN_STRIDE = KV_CACHE_DIM + K_ROPE_DIM;
 constexpr int64_t K_ROPE_UB_BYTES = K_ROPE_DIM * sizeof(uint16_t);
 constexpr int64_t KV_CACHE_UB_BYTES = KV_CACHE_DIM * sizeof(uint16_t);
 
-template <typename T, bool COMBINED_LAYOUT = false>
+// DRAM_SPLIT_LAYOUT selects the source (DRAM) storage format. The HBM
+// destination is always the combined [CKV|KPE]=576 resident page format, so
+// only the source addressing depends on the flag.
+template <typename T, bool DRAM_SPLIT_LAYOUT = false>
 class FirstFillScatterCopyKernel
 {
 public:
@@ -168,17 +171,17 @@ private:
 
         const int64_t srcRow = static_cast<int64_t>(srcPhysicalBlock) * BLOCK_SIZE + srcBlockOffset;
         const int64_t dstRow = static_cast<int64_t>(dstPhysicalBlock) * BLOCK_SIZE + dstBlockOffset;
-        if constexpr (COMBINED_LAYOUT) {
-            address.srcKv = srcRow * COMBINED_TOKEN_STRIDE;
-            address.dstKv = dstRow * COMBINED_TOKEN_STRIDE;
-            address.srcRope = srcRow * COMBINED_TOKEN_STRIDE;
-            address.dstRope = dstRow * COMBINED_TOKEN_STRIDE;
-        } else {
+        if constexpr (DRAM_SPLIT_LAYOUT) {
+            // GVA split DRAM: K[512] and rope[64] are independent buffers,
+            // each densely packed per 128-token page.
             address.srcKv = srcRow * KV_CACHE_DIM;
-            address.dstKv = dstRow * KV_CACHE_DIM;
             address.srcRope = srcRow * K_ROPE_DIM;
-            address.dstRope = dstRow * K_ROPE_DIM;
+        } else {
+            address.srcKv = srcRow * COMBINED_TOKEN_STRIDE;
+            address.srcRope = srcRow * COMBINED_TOKEN_STRIDE;
         }
+        address.dstKv = dstRow * COMBINED_TOKEN_STRIDE;
+        address.dstRope = dstRow * COMBINED_TOKEN_STRIDE;
         return true;
     }
 
