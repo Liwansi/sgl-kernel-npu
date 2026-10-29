@@ -162,7 +162,7 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "Tensor num_cache_tokens, Tensor topk_src_ids, Tensor topk_dst_slots, Tensor topk_miss_counts, "
         "Tensor miss_src_ids, Tensor miss_dst_slots, Tensor miss_counts, Tensor hbm_block_table, "
         "Tensor dram_block_table, int dram_k_dev_ptr, int dram_v_dev_ptr, Tensor(b!) attention_out, "
-        "float scale_value) -> ()");
+        "float scale_value, bool full_visible=False) -> ()");
 
 #ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
     m.def(
@@ -211,7 +211,7 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "Tensor(a!) cache_slots_pool, Tensor(b!) topk_src_ids, "
         "Tensor(c!) topk_dst_slots, Tensor(d!) topk_miss_counts, "
         "Tensor(e!) miss_src_ids, Tensor(f!) miss_dst_slots, "
-        "Tensor(g!) miss_counts) -> ()");
+        "Tensor(g!) miss_counts, bool full_visible=False) -> ()");
 
     m.def(
         "lightning_indexer(Tensor query, Tensor key, Tensor weights, Tensor? actual_seq_lengths_query=None, "

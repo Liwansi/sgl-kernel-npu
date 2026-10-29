@@ -9,7 +9,7 @@
 #include "sparse_flash_attention_tiling_data.h"
 
 // Direct-launch ABI: the first 144 bytes are byte-for-byte the SGLang SFA
-// tiling POD; the final 16 bytes describe source-aware gather capacities.
+// tiling POD; the suffix describes source-aware gather capacities and mode.
 // Keep this header usable by both host and AscendC compilation.
 struct alignas(8) FusedCopySfaTilingData {
     SparseFlashAttentionBaseParamsMla baseParams;
@@ -25,7 +25,7 @@ struct alignas(8) FusedCopySfaTilingData {
     // rope/V[64] live in separately allocated buffers. Zero keeps the legacy
     // combined [CKV|KPE]=576 rows at one base pointer.
     uint32_t dramSplitLayout;
-    uint32_t reserved;
+    uint32_t fullVisible;
 };
 
 static_assert(sizeof(SparseFlashAttentionTilingDataMla) == 144);
@@ -42,6 +42,7 @@ static_assert(offsetof(FusedCopySfaTilingData, missCap) == 148);
 static_assert(offsetof(FusedCopySfaTilingData, hbmMaxBlockNum) == 152);
 static_assert(offsetof(FusedCopySfaTilingData, dramMaxBlockNum) == 156);
 static_assert(offsetof(FusedCopySfaTilingData, dramSplitLayout) == 160);
+static_assert(offsetof(FusedCopySfaTilingData, fullVisible) == 164);
 static_assert(sizeof(FusedCopySfaTilingData) == 168);
 
 #endif  // SGL_KERNEL_NPU_FUSED_COPY_SFA_TILING_DATA_H

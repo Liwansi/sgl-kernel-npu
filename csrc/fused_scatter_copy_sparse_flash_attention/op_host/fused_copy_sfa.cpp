@@ -57,7 +57,7 @@ void fused_scatter_copy_sparse_flash_attention(
     const at::Tensor &num_cache_tokens, const at::Tensor &topk_src_ids, const at::Tensor &topk_dst_slots,
     const at::Tensor &topk_miss_counts, const at::Tensor &miss_src_ids, const at::Tensor &miss_dst_slots,
     const at::Tensor &miss_counts, const at::Tensor &hbm_block_table, const at::Tensor &dram_block_table,
-    int64_t dram_k_dev_ptr, int64_t dram_v_dev_ptr, at::Tensor &attention_out, double scale_value)
+    int64_t dram_k_dev_ptr, int64_t dram_v_dev_ptr, at::Tensor &attention_out, double scale_value, bool full_visible)
 {
     TORCH_CHECK(query.scalar_type() == at::kHalf || query.scalar_type() == at::kBFloat16,
                 "query must be float16 or bfloat16");
@@ -168,6 +168,7 @@ void fused_scatter_copy_sparse_flash_attention(
     TORCH_CHECK(sfaData.GetDataSize() == sizeof(SparseFlashAttentionTilingDataMla),
                 "unexpected SFA tiling prefix size");
     sfaData.SaveToBuffer(reinterpret_cast<uint8_t *>(&fusedTilingData), sizeof(SparseFlashAttentionTilingDataMla));
+    fusedTilingData.fullVisible = full_visible ? 1U : 0U;
     fusedTilingData.copyCap = static_cast<uint32_t>(topk_src_ids.size(2));
     fusedTilingData.missCap = static_cast<uint32_t>(miss_src_ids.size(1));
     fusedTilingData.hbmMaxBlockNum = static_cast<uint32_t>(hbm_block_table.size(1));
@@ -177,7 +178,6 @@ void fused_scatter_copy_sparse_flash_attention(
     // combined [CKV|KPE]=576 rows addressed from the K base pointer.
     const bool dramSplitLayout = dram_v_dev_ptr > 0;
     fusedTilingData.dramSplitLayout = dramSplitLayout ? 1U : 0U;
-    fusedTilingData.reserved = 0;
     std::array<uint8_t, sizeof(FusedCopySfaTilingData)> tilingBytes{};
     std::memcpy(tilingBytes.data(), &fusedTilingData, sizeof(fusedTilingData));
     auto tilingTensor = context->GetTilingTensor(tilingBytes);
