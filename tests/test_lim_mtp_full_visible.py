@@ -362,7 +362,8 @@ def test_copy_sfa_full_visible_refreshes_resident_hit(graph, refresh_tail):
             torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
                 case.query,
                 case.query_rope,
-                case.hbm,
+                (case.hbm).k,
+                (case.hbm).v,
                 case.actual_q,
                 case.actual_kv,
                 case.cache_tokens,
@@ -374,7 +375,8 @@ def test_copy_sfa_full_visible_refreshes_resident_hit(graph, refresh_tail):
                 case.miss_counts,
                 case.hbm_block_table,
                 case.dram_block_table,
-                case.dram_dev_ptr,
+                case.dram.k_ptr,
+                case.dram.v_ptr,
                 case.output,
                 case.scale,
                 full_visible=True,
@@ -394,7 +396,7 @@ def test_copy_sfa_full_visible_refreshes_resident_hit(graph, refresh_tail):
                 run()
         # Simulate a rejected draft whose absolute position is rewritten.
         torch.npu.synchronize()
-        case.dram[0, 0].fill_(3)
+        case.dram.fill_row((0, 0), 3)
         if graph:
             capture.replay()
         else:
@@ -440,7 +442,8 @@ def test_copy_sfa_q4_c12288_exact_k_no_tail(refresh_tail):
         torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
             case.query,
             case.query_rope,
-            case.hbm,
+            (case.hbm).k,
+            (case.hbm).v,
             case.actual_q,
             case.actual_kv,
             case.cache_tokens,
@@ -452,7 +455,8 @@ def test_copy_sfa_q4_c12288_exact_k_no_tail(refresh_tail):
             case.miss_counts,
             case.hbm_block_table,
             case.dram_block_table,
-            case.dram_dev_ptr,
+            case.dram.k_ptr,
+            case.dram.v_ptr,
             case.output,
             case.scale,
             full_visible=True,
@@ -479,7 +483,8 @@ def test_copy_sfa_q4_c12288_exact_k_no_tail(refresh_tail):
             torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
                 case.query,
                 case.query_rope,
-                case.hbm,
+                (case.hbm).k,
+                (case.hbm).v,
                 case.actual_q,
                 case.actual_kv,
                 case.cache_tokens,
@@ -491,7 +496,8 @@ def test_copy_sfa_q4_c12288_exact_k_no_tail(refresh_tail):
                 case.miss_counts,
                 case.hbm_block_table,
                 case.dram_block_table,
-                case.dram_dev_ptr,
+                case.dram.k_ptr,
+                case.dram.v_ptr,
                 case.output,
                 case.scale,
                 full_visible=True,

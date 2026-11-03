@@ -1,4 +1,4 @@
-"""Native planner + combined-layout Copy-SFA integration coverage.
+"""Native planner + split-layout Copy-SFA integration coverage.
 
 These tests need a built A3 sgl-kernel-npu extension and a visible NPU. They
 deliberately import the extension only after the NPU availability check so CPU
@@ -11,6 +11,8 @@ import importlib
 import math
 
 import pytest
+from split_kv_fixture import SplitKVFixture
+
 import torch
 
 
@@ -149,6 +151,9 @@ class _CopySfaCase:
         self.cache_tokens = self.actual_kv.clone()
         self.attention_out = torch.empty_like(self.query)
 
+        self.hbm = SplitKVFixture(self.hbm)
+        self.dram = SplitKVFixture.host(self.dram, offload_ops, self.device_id)
+
     def _populate_dram_with_page_permutation(self):
         # Physical host pages are intentionally permuted. The operator receives
         # only the device-mapped base pointer and resolves logical page IDs via
@@ -214,7 +219,8 @@ class _CopySfaCase:
         torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
             self.query,
             self.query_rope,
-            self.hbm,
+            (self.hbm).k,
+            (self.hbm).v,
             self.actual_q,
             self.actual_kv,
             self.cache_tokens,
@@ -226,7 +232,8 @@ class _CopySfaCase:
             self.miss_counts,
             self.hbm_block_table,
             self.dram_block_table,
-            self.dram_dev_ptr,
+            self.dram.k_ptr,
+            self.dram.v_ptr,
             self.attention_out,
             self.scale,
         )

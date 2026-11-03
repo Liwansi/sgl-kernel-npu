@@ -138,11 +138,11 @@ extern "C" __global__ __aicore__ void fused_scatter_copy_sparse_flash_attention_
     const bool firstFill = copyMode == 1;
     if (copyMode != 0) {
         if (isBf16) {
-            RunFirstFillScatterCopy<bfloat16_t, true>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
+            RunFirstFillScatterCopy<bfloat16_t, false>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
                                                       dramBlockTable, missSourceIds, missDstSlots, missCounts,
                                                       actualSeqLengthsQuery, copyMode == 2, fusedTiling, &pipe);
         } else {
-            RunFirstFillScatterCopy<half, true>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
+            RunFirstFillScatterCopy<half, false>(hbmKeyRope, key, dramKeyRope, dramKvCache, hbmBlockTable,
                                                 dramBlockTable, missSourceIds, missDstSlots, missCounts,
                                                 actualSeqLengthsQuery, copyMode == 2, fusedTiling, &pipe);
         }
@@ -155,24 +155,24 @@ extern "C" __global__ __aicore__ void fused_scatter_copy_sparse_flash_attention_
     }
     if (!isBf16) {
         if (firstFill) {
-            RunFusedMtp<half, false, true>(
+            RunFusedMtp<half, false, false>(
                 query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
                 queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
                 missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);
         } else {
-            RunFusedMtp<half, true, true>(
+            RunFusedMtp<half, true, false>(
                 query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
                 queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
                 missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);
         }
     } else {
         if (firstFill) {
-            RunFusedMtp<bfloat16_t, false, true>(
+            RunFusedMtp<bfloat16_t, false, false>(
                 query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
                 queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
                 missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);
         } else {
-            RunFusedMtp<bfloat16_t, true, true>(
+            RunFusedMtp<bfloat16_t, true, false>(
                 query, key, value, sparseIndices, cacheTokens, hbmBlockTable, actualSeqLengthsQuery, actualSeqLengthsKv,
                 queryRope, hbmKeyRope, dramKeyRope, dramKvCache, dramBlockTable, topkSourceIds, topkMissCounts,
                 missSourceIds, missDstSlots, missCounts, attentionOut, attentionWorkspace, fusedTiling, tiling, &pipe);

@@ -15,6 +15,8 @@ import importlib
 import math
 
 import pytest
+from split_kv_fixture import SplitKVFixture
+
 import torch
 
 BLOCK_SIZE = 128
@@ -156,8 +158,8 @@ class _DynamicTndCase:
         self.cache_tokens_cpu = torch.tensor(cache_budgets, dtype=torch.int32)
 
         # The operator reads host KV through this registered, device-mapped
-        # allocation. Keeping both K/V portions in each 576-wide token matches
-        # the production combined-cache layout.
+        # allocation. The combined CPU oracle is split into independently
+        # registered CKV/KPE buffers before the operator is invoked.
         dram_blocks_per_request = (
             max(1, math.ceil(max(cache_budgets) / BLOCK_SIZE))
             if first_fill or self.steady_miss_requests
@@ -299,6 +301,10 @@ class _DynamicTndCase:
         self.scale = scale
         self._closed = False
 
+        self.hbm = SplitKVFixture(self.hbm)
+        self.initial_hbm = SplitKVFixture(self.initial_hbm)
+        self.dram = SplitKVFixture.host(self.dram, ops, self.device_id)
+
     def call(
         self,
         hbm=None,
@@ -310,7 +316,8 @@ class _DynamicTndCase:
         torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
             self.query,
             self.query_rope,
-            self.hbm if hbm is None else hbm,
+            (self.hbm if hbm is None else hbm).k,
+            (self.hbm if hbm is None else hbm).v,
             self.actual_q,
             self.actual_kv,
             self.cache_tokens,
@@ -322,7 +329,8 @@ class _DynamicTndCase:
             self.miss_counts if miss_counts is None else miss_counts,
             self.hbm_block_table,
             self.dram_block_table,
-            self.dram_dev_ptr,
+            self.dram.k_ptr,
+            self.dram.v_ptr,
             self.output if output is None else output,
             self.scale,
         )
@@ -473,6 +481,9 @@ class _C0DenseMixedGraphCase:
         self.scale = 1.0 / math.sqrt(TOKEN_STRIDE)
         self._closed = False
 
+        self.hbm = SplitKVFixture(self.hbm)
+        self.dram = SplitKVFixture.host(self.dram, ops, self.device_id)
+
     def call(
         self,
         *,
@@ -487,7 +498,8 @@ class _C0DenseMixedGraphCase:
         torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
             self.query,
             self.query_rope,
-            hbm,
+            (hbm).k,
+            (hbm).v,
             self.actual_q,
             actual_kv,
             cache_tokens,
@@ -499,7 +511,8 @@ class _C0DenseMixedGraphCase:
             self.miss_counts,
             self.hbm_block_table,
             self.dram_block_table,
-            self.dram_dev_ptr,
+            self.dram.k_ptr,
+            self.dram.v_ptr,
             output,
             self.scale,
         )
@@ -643,9 +656,7 @@ def test_copy_sfa_c0_dense_mixed_graph_and_first_long_transition():
 
 def test_copy_sfa_dynamic_tnd_heterogeneous_mtp_and_cache_budgets():
     _run_and_check(
-        query_counts=[3, 4, 9, 16],
-        heads=8,
-        cache_budgets=[2048, 2176, 2304, 2432],
+        query_counts=[3, 4, 9, 16], heads=8, cache_budgets=[2048, 2176, 2304, 2432]
     )
 
 
@@ -695,37 +706,21 @@ def test_copy_sfa_dynamic_tnd_mixed_first_fill_and_shared_steady_miss():
 
 def test_copy_sfa_dynamic_tnd_steady_nonzero_miss():
     _run_and_check(
-        query_counts=[3],
-        heads=8,
-        steady_miss_requests={0},
-        cache_budgets=[2176],
+        query_counts=[3], heads=8, steady_miss_requests={0}, cache_budgets=[2176]
     )
 
 
 def test_copy_sfa_dynamic_tnd_query_causal_poisoned_tail():
     _run_and_check(
-        query_counts=[3],
-        heads=8,
-        cache_budgets=[2048],
-        poisoned_future_tail=True,
+        query_counts=[3], heads=8, cache_budgets=[2048], poisoned_future_tail=True
     )
 
 
 def test_copy_sfa_dynamic_tnd_tail_crosses_page_boundary():
     # The earliest query sees C+128 tokens, while later MTP routes extend into
     # the next tail page. This checks the causal tail walk across page 128.
-    _run_and_check(
-        query_counts=[4],
-        heads=8,
-        cache_budgets=[2048],
-        tail_tokens=127,
-    )
+    _run_and_check(query_counts=[4], heads=8, cache_budgets=[2048], tail_tokens=127)
 
 
 def test_copy_sfa_dynamic_tnd_lim_sized_first_fill_graph():
-    _run_and_check(
-        query_counts=[4],
-        heads=8,
-        first_fill=True,
-        cache_budgets=[12288],
-    )
+    _run_and_check(query_counts=[4], heads=8, first_fill=True, cache_budgets=[12288])

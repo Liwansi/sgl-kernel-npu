@@ -78,7 +78,8 @@ def _check_refresh_plan(graph, resident_count, genuine_misses, *, suffix_contrac
             torch.ops.npu.fused_scatter_copy_sparse_flash_attention(
                 case.query,
                 case.query_rope,
-                case.hbm,
+                (case.hbm).k,
+                (case.hbm).v,
                 case.actual_q,
                 case.actual_kv,
                 case.cache_tokens,
@@ -90,7 +91,8 @@ def _check_refresh_plan(graph, resident_count, genuine_misses, *, suffix_contrac
                 case.miss_counts,
                 case.hbm_block_table,
                 case.dram_block_table,
-                case.dram_dev_ptr,
+                case.dram.k_ptr,
+                case.dram.v_ptr,
                 case.output,
                 case.scale,
                 **options,
@@ -108,7 +110,7 @@ def _check_refresh_plan(graph, resident_count, genuine_misses, *, suffix_contrac
                 refresh = min(resident_count, width)
                 for slot in range(topk - refresh, topk):
                     block = int(case.dram_block_table_cpu[request, slot // 128])
-                    case.dram[block, slot % 128].fill_(1.25 + step + request)
+                    case.dram.fill_row((block, slot % 128), 1.25 + step + request)
             case.hbm.copy_(case.initial_hbm)
             expected_cache = case.initial_hbm.cpu().reshape(-1, 128, 576).clone()
             for request, count in enumerate(request_counts.tolist()):

@@ -21,7 +21,6 @@ constexpr int64_t kPageSize = 128;
 constexpr int64_t kMaxQueriesPerRequest = 16;
 constexpr int64_t kKvDim = 512;
 constexpr int64_t kRopeDim = 64;
-constexpr int64_t kTokenStride = 576;
 
 void CheckInt32(const at::Tensor &tensor, const char *name)
 {
@@ -52,12 +51,12 @@ void LaunchCombined(uint32_t blockDim, const at::Tensor &query, const at::Tensor
 }  // namespace
 
 void fused_scatter_copy_sparse_flash_attention(
-    const at::Tensor &query, const at::Tensor &query_rope, at::Tensor &combined_hbm_cache,
+    const at::Tensor &query, const at::Tensor &query_rope, at::Tensor &hbm_k_cache, at::Tensor &hbm_v_cache,
     const at::Tensor &actual_seq_lengths_query, const at::Tensor &actual_seq_lengths_kv,
     const at::Tensor &num_cache_tokens, const at::Tensor &topk_src_ids, const at::Tensor &topk_dst_slots,
     const at::Tensor &topk_miss_counts, const at::Tensor &miss_src_ids, const at::Tensor &miss_dst_slots,
     const at::Tensor &miss_counts, const at::Tensor &hbm_block_table, const at::Tensor &dram_block_table,
-    int64_t dram_kv_dev_ptr, at::Tensor &attention_out, double scale_value, bool full_visible,
+    int64_t dram_k_dev_ptr, int64_t dram_v_dev_ptr, at::Tensor &attention_out, double scale_value, bool full_visible,
     bool resident_refresh_tail)
 {
     TORCH_CHECK(!resident_refresh_tail || full_visible,
@@ -76,14 +75,17 @@ void fused_scatter_copy_sparse_flash_attention(
     TORCH_CHECK(query_rope.dim() == 3 && query_rope.size(0) == totalQueryTokens &&
                     query_rope.size(1) == query.size(1) && query_rope.size(2) == kRopeDim,
                 "query_rope must be [T, H, 64]");
-    TORCH_CHECK(combined_hbm_cache.scalar_type() == query.scalar_type() && combined_hbm_cache.dim() == 4 &&
-                    combined_hbm_cache.size(1) == kPageSize && combined_hbm_cache.size(2) == 1 &&
-                    combined_hbm_cache.size(3) == kTokenStride && combined_hbm_cache.is_contiguous(),
-                "combined_hbm_cache must be [pages, 128, 1, 576] and match query dtype");
-    TORCH_CHECK(combined_hbm_cache.size(0) > 0, "combined_hbm_cache must contain at least one page");
+    TORCH_CHECK(hbm_k_cache.scalar_type() == query.scalar_type() && hbm_k_cache.dim() == 4 &&
+                    hbm_k_cache.size(0) > 0 && hbm_k_cache.size(1) == kPageSize &&
+                    hbm_k_cache.size(2) == 1 && hbm_k_cache.size(3) == kKvDim,
+                "hbm_k_cache must be [pages, 128, 1, 512] and match query dtype");
+    TORCH_CHECK(hbm_v_cache.scalar_type() == query.scalar_type() && hbm_v_cache.dim() == 4 &&
+                    hbm_v_cache.size(0) == hbm_k_cache.size(0) && hbm_v_cache.size(1) == kPageSize &&
+                    hbm_v_cache.size(2) == 1 && hbm_v_cache.size(3) == kRopeDim,
+                "hbm_v_cache must be [pages, 128, 1, 64] and match query dtype");
     TORCH_CHECK(attention_out.sizes() == query.sizes() && attention_out.scalar_type() == query.scalar_type(),
                 "attention_out must match query shape and dtype");
-    TORCH_CHECK(dram_kv_dev_ptr > 0, "dram_kv_dev_ptr must be a registered host pointer");
+    TORCH_CHECK(dram_k_dev_ptr > 0 && dram_v_dev_ptr > 0, "DRAM K/V must be MF-mapped host pointers");
     TORCH_CHECK(hbm_block_table.dim() == 2 && hbm_block_table.size(0) == batchSize && hbm_block_table.size(1) > 0,
                 "hbm_block_table must be [B, hbm_pages_per_request]");
     TORCH_CHECK(dram_block_table.dim() == 2 && dram_block_table.size(0) == batchSize && dram_block_table.size(1) > 0,
@@ -117,16 +119,13 @@ void fused_scatter_copy_sparse_flash_attention(
     }
     CheckNpuTensor(query_rope, query, "query_rope");
     CheckNpuTensor(query, query, "query");
-    CheckNpuTensor(combined_hbm_cache, query, "combined_hbm_cache");
+    CheckNpuTensor(hbm_k_cache, query, "hbm_k_cache");
+    CheckNpuTensor(hbm_v_cache, query, "hbm_v_cache");
     CheckNpuTensor(attention_out, query, "attention_out");
     TORCH_CHECK(query_rope.scalar_type() == query.scalar_type(), "query_rope dtype must match query");
 
-    const int64_t hbmBlockCount = combined_hbm_cache.size(0);
-    const int64_t rowStride = kTokenStride;
-    auto cacheKey = at::as_strided(combined_hbm_cache, {hbmBlockCount, kPageSize, 1, kKvDim},
-                                   {kPageSize * rowStride, rowStride, rowStride, 1}, 0);
-    auto cacheRope = at::as_strided(combined_hbm_cache, {hbmBlockCount, kPageSize, 1, kRopeDim},
-                                    {kPageSize * rowStride, rowStride, rowStride, 1}, kKvDim);
+    const auto &cacheKey = hbm_k_cache;
+    const auto &cacheRope = hbm_v_cache;
 
     const auto &attentionOut = attention_out;
     auto softmaxMax = at::empty({0}, query.options().dtype(at::kFloat));
@@ -180,9 +179,9 @@ void fused_scatter_copy_sparse_flash_attention(
     std::memcpy(tilingBytes.data(), &fusedTilingData, sizeof(fusedTilingData));
     auto tilingTensor = context->GetTilingTensor(tilingBytes);
     auto workspace = at::empty({static_cast<int64_t>(context->GetWorkspaceSize())}, query.options().dtype(at::kByte));
-    auto *dramKv = reinterpret_cast<void *>(static_cast<uintptr_t>(dram_kv_dev_ptr));
-    auto *dramRope = reinterpret_cast<void *>(static_cast<uintptr_t>(dram_kv_dev_ptr + kKvDim * 2));
-    auto *hbmRope = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(combined_hbm_cache.data_ptr()) + kKvDim * 2);
+    auto *dramKv = reinterpret_cast<void *>(static_cast<uintptr_t>(dram_k_dev_ptr));
+    auto *dramRope = reinterpret_cast<void *>(static_cast<uintptr_t>(dram_v_dev_ptr));
+    auto *hbmRope = hbm_v_cache.data_ptr();
 
     LaunchCombined(tiling.GetBlockDim(), query, cacheKey, cacheKey, topk_dst_slots, num_cache_tokens, hbm_block_table,
                    actual_seq_lengths_query, actual_seq_lengths_kv, query_rope, hbmRope, dramRope, dramKv,

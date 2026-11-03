@@ -133,13 +133,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> sparse_flash_attention(
 
 void fused_scatter_copy_sparse_flash_attention(
     const at::Tensor &query, const at::Tensor &query_rope,
-    at::Tensor &combined_hbm_cache, const at::Tensor &actual_seq_lengths_query,
+    at::Tensor &hbm_k_cache, at::Tensor &hbm_v_cache,
+    const at::Tensor &actual_seq_lengths_query,
     const at::Tensor &actual_seq_lengths_kv, const at::Tensor &num_cache_tokens,
     const at::Tensor &topk_src_ids, const at::Tensor &topk_dst_slots,
     const at::Tensor &topk_miss_counts, const at::Tensor &miss_src_ids,
     const at::Tensor &miss_dst_slots, const at::Tensor &miss_counts,
     const at::Tensor &hbm_block_table, const at::Tensor &dram_block_table,
-    int64_t dram_kv_dev_ptr, at::Tensor &attention_out, double scale_value,
+    int64_t dram_k_dev_ptr, int64_t dram_v_dev_ptr, at::Tensor &attention_out, double scale_value,
     bool full_visible, bool resident_refresh_tail);
 
 #ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
